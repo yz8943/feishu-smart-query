@@ -71,7 +71,7 @@ async function searchRecords(appToken, tableId, filter) {
         )
 
         const resp = res.data
-        console.log("searchRecords res.data:", JSON.stringify(res.data));
+        //console.log("searchRecords res.data:", JSON.stringify(res.data));
 
         // 检查 API 返回
         if (!resp || resp.code !== 0) {
