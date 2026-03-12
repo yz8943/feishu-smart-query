@@ -33,7 +33,8 @@ async function getTenantToken() {
 async function getFields(appToken, tableId) {
 
     const token = await getTenantToken()
-
+    console.log("appToken："+token);
+    console.log("tableId："+tableId);
     const res = await axios.get(
         `https://open.feishu.cn/open-apis/bitable/v1/apps/${appToken}/tables/${tableId}/fields`,
         {
@@ -42,11 +43,12 @@ async function getFields(appToken, tableId) {
             }
         }
     )
-    return res.data.data.items.map(f => ({
-        name: f.field_name,
-        type: f.type
-    }));
-    //return res.data.data.items
+    // return res.data.data.items.map(f => ({
+    //     name: f.field_name,
+    //     type: f.type
+    // }));
+    console.log("getFields:"+JSON.stringify(res.data));
+    return res.data.data.items
 }
 
 async function searchRecords(appToken, tableId, filter) {
@@ -83,12 +85,21 @@ async function searchRecords(appToken, tableId, filter) {
         const data = resp.data || {}
         const items = data.items || []
 
-        all.push(...items.map(i => i.fields || {}))
+        // 推入非空 fields
+        const fieldsList = items
+            .map(i => i.fields)
+            .filter(f => f); // 过滤掉 null/undefined
+
+        all.push(...fieldsList);
+
+        // 调试打印
+        console.log("本页记录数:", items.length);
 
         if (!data.has_more) break
         pageToken = data.page_token
     }
 
+    //console.log("all 示例:", all.slice(0, 3)); // 打印前三条
     return all
 }
 

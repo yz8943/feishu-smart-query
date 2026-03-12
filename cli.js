@@ -49,8 +49,8 @@ program
 
     try {
       const records = await smartQuery(appToken, tableId, options.question);
-      console.log("最终记录:", records.length);
-      //console.log(JSON.stringify(records, null, 2));
+      //console.log("最终记录:",records.length);
+      console.log(JSON.stringify(records, null, 2));
     } catch (err) {
       console.error("查询失败:", err.message);
     }
