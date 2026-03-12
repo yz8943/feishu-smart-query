@@ -47,7 +47,7 @@ async function getFields(appToken, tableId) {
     //     name: f.field_name,
     //     type: f.type
     // }));
-    console.log("getFields:"+JSON.stringify(res.data));
+    //console.log("getFields:"+JSON.stringify(res.data));
     return res.data.data.items
 }
 
