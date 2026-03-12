@@ -93,7 +93,7 @@ async function searchRecords(appToken, tableId, filter) {
         all.push(...fieldsList);
 
         // 调试打印
-        console.log("本页记录数:", items.length);
+       // console.log("本页记录数:", items.length);
 
         if (!data.has_more) break
         pageToken = data.page_token
