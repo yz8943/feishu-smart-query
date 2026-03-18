@@ -1,0 +1,7 @@
+/*.env
+node_modules
+/bin/*.js
+/.idea/*.gitignore
+/.idea/*.iml
+/.idea/*.xml
+/cache/*.json
