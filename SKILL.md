@@ -139,7 +139,7 @@ LLM 解析剩余条件 → 结构化 JSON 数组
 
 | 文件 | 作用 |
 |------|------|
-| `cli.js` | 命令行入口，`query` / `sync` / `watch` 命令 |
+| `cli.js` | 命令行入口，`smart-query` / `sync` / `watch` 命令 |
 | `sync.js` | 全量同步：分页拉取飞书数据 → 本地 JSON + 字段元数据 |
 | `local-query.js` | 查询核心：预处理 + LLM解析 + 本地过滤 |
 | `llm.js` | LLM 调用封装 |
