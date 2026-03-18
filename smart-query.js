@@ -96,6 +96,23 @@ async function smartQuery(appToken, tableId, question) {
 
   await loadFields(appToken, tableId)
 
+  // ★ 纯项目名称搜索模式：无人名、无时间词、无出品性质关键词
+  //   直接用项目名称做全文搜索，跳过LLM，避免把名称拆成多字段AND导致0结果
+  if (isPureNameQuery(question)) {
+    console.log('🔍 纯名称搜索模式，跳过LLM，直接用项目名称搜索')
+    const filter = {
+      conjunction: "and",
+      children: [{
+        conjunction: "and",
+        conditions: [{ field_name: "项目名称", operator: "contains", value: [question] }]
+      }]
+    }
+    console.log("\n最终 Filter:", JSON.stringify(filter, null, 2))
+    const records = await searchRecords(appToken, tableId, filter)
+    console.log("命中记录数:", records.length)
+    return records
+  }
+
   // 1. LLM 生成 filter children
   let children = await llmBuildChildren(question)
 
@@ -118,6 +135,33 @@ async function smartQuery(appToken, tableId, question) {
   console.log("命中记录数:", records.length)
 
   return records
+}
+
+/* ================================================================
+   判断是否为纯项目名称查询
+   条件：无人名别名、无时间词、无出品性质词
+   ================================================================ */
+
+const NATURE_KEYWORDS = ['商配', '自制', '联制', '商单']
+
+const TIME_PATTERNS = [
+  /下下[周星期]/, /下[周星期]/, /本[周星期]/, /这[周星期]/,
+  /上[周星期]/, /今[天日年]/, /去年/, /明[天日]/,
+  /最近\d+天/, /最近一?[周个]?月/, /\d{4}年/
+]
+
+function isPureNameQuery(question) {
+  // 含人名别名 → 不是纯名称查询
+  const q = question.toLowerCase()
+  for (const u of KNOWN_USERS) {
+    const words = [u.name, ...(u.alias || [])]
+    if (words.some(w => q.includes(w.toLowerCase()))) return false
+  }
+  // 含时间词 → 不是纯名称查询
+  if (TIME_PATTERNS.some(p => p.test(question))) return false
+  // 含出品性质词 → 不是纯名称查询
+  if (NATURE_KEYWORDS.some(k => question.includes(k))) return false
+  return true
 }
 
 /* ================================================================
@@ -170,6 +214,7 @@ function rulePostProcess(question, children) {
   }
 
   // ---- 3. 从问题中识别枚举值，补充 LLM 漏掉的枚举条件 ----
+  //   ★ 新增：如果某枚举词是更长枚举选项的子串且那个更长选项也出现在问题中，跳过
   const existingEnumKeys = new Set()
   for (const c of children) {
     if (c.field_name && IDX.select.includes(c.field_name)) {
@@ -180,10 +225,15 @@ function rulePostProcess(question, children) {
   for (const fieldName of IDX.select) {
     for (const opt of (IDX.selectOptions[fieldName] || [])) {
       // 短选项（≤2字符）要求前后是分隔符或字符串边界，防止误匹配"S09"里的"S"
-      const matched = opt.length <= 2
+      const basicMatch = opt.length <= 2
           ? new RegExp(`(^|[-_\\s/])${escapeReg(opt)}($|[-_\\s/])`).test(question)
           : question.includes(opt)
-      if (!matched) continue
+
+      if (!basicMatch) continue
+
+      // ★ 跳过：该枚举词是其他更长枚举选项的子串，且那个更长选项也出现在问题中
+      if (isSubstringOfLongerMatch(opt, question, fieldName)) continue
+
       const key = fieldName + ":" + opt
       if (existingEnumKeys.has(key)) continue
       console.log(`规则补充枚举条件: ${fieldName} contains "${opt}"`)
@@ -197,7 +247,6 @@ function rulePostProcess(question, children) {
   for (const u of KNOWN_USERS) {
     allAliases.push(u.name, ...(u.alias || []))
   }
-  // 只收集长度 > 1 的枚举选项参与清洗，单字母不清洗（避免误删）
   const allOpts = Object.values(IDX.selectOptions).flat().filter(o => o.length > 1)
 
   children = children.map(c => {
@@ -206,7 +255,6 @@ function rulePostProcess(question, children) {
 
     const cleaned = c.value.map(v => {
       let s = v
-      // 去掉人名别名：必须前后紧跟分隔符或字符串边界
       const sortedAliases = [...allAliases].sort((a, b) => b.length - a.length)
       for (const alias of sortedAliases) {
         s = s.replace(
@@ -214,7 +262,6 @@ function rulePostProcess(question, children) {
             (_, pre, suf) => (pre && suf) ? pre : ""
         )
       }
-      // 去掉枚举词：同样要求边界，且只处理长度 > 1 的
       for (const opt of allOpts) {
         s = s.replace(
             new RegExp(`(^|[-_\\s])${escapeReg(opt)}($|[-_\\s])`, "g"),
@@ -235,6 +282,24 @@ function rulePostProcess(question, children) {
   }).filter(Boolean)
 
   return children
+}
+
+/* ================================================================
+   判断某枚举词是否是同字段或其他字段中更长选项的子串，
+   且那个更长选项也出现在问题中 → 避免"情怀车"被误识别成短枚举
+   ================================================================ */
+
+function isSubstringOfLongerMatch(opt, question, currentField) {
+  for (const fieldName of IDX.select) {
+    for (const other of (IDX.selectOptions[fieldName] || [])) {
+      if (other === opt) continue
+      if (other.includes(opt) && question.includes(other)) {
+        console.log(`跳过枚举词 "${opt}"（是更长选项 "${other}" 的子串，且后者也出现在问题中）`)
+        return true
+      }
+    }
+  }
+  return false
 }
 
 function escapeReg(s) {
@@ -281,27 +346,19 @@ function buildPrompt(question) {
   const thisYear = now.getFullYear()
   const lastYear = thisYear - 1
 
-  // 只列出有 openid 的用户，别名展开为一行
   const userLines = KNOWN_USERS
       .filter(u => USER_OPENID[u.name])
       .map(u => `${[u.name, ...u.alias].join("/")}=${USER_OPENID[u.name]}`)
       .join(" ")
 
-  // 枚举字段：只列字段名和选项，不加多余描述
   const selectLines = IDX.select.map(f =>
       `${f}:[${(IDX.selectOptions[f] || []).join(",")}]`
   ).join("\n")
 
-  // 文本字段一行
   const textLine = IDX.text.join(",")
-
-  // 人员字段一行
   const userField = IDX.user[0] || "主持人/作者"
-
-  // 日期字段
   const dateField = IDX.date[0] || "执行日期"
 
-  // 时间戳直接算好
   const nowMs = Date.now()
   const lyStart  = new Date(`${lastYear}-01-01`).getTime()
   const lyEnd    = new Date(`${lastYear}-12-31T23:59:59`).getTime()
@@ -310,7 +367,6 @@ function buildPrompt(question) {
   const weekStart = nowMs - 7 * 86400000
   const monthStart = nowMs - 30 * 86400000
 
-  // 把所有合法字段名列成一行，让 GLM 直接看到能用哪些
   const allFieldList = IDX.allFieldNames.join("、")
 
   return `任务：将用户问题转为飞书bitable查询条件，输出JSON数组。
@@ -340,24 +396,11 @@ ${userLines}
   {"field_name":"平台","operator":"contains","value":["抖音"]}
   {"field_name":"内容类型","operator":"contains","value":["详情"]}
 
-【输出格式，只能用以下3种结构】
-
-文本条件（文本字段只能用contains）：
-{"field_name":"项目名称","operator":"contains","value":["关键词"]}
-
-枚举条件：
-{"field_name":"出品性质","operator":"contains","value":["商配"]}
-
-人员条件：
-{"conjunction":"or","conditions":[{"field_name":"主持人/作者","operator":"is","value":["openid"]}]}
-
-日期条件：
-{"conjunction":"and","conditions":[{"field_name":"执行日期","operator":"isGreater","value":["ExactDate","ms"]},{"field_name":"执行日期","operator":"isLess","value":["ExactDate","ms"]}]}
-
 【注意】
 - field_name只能是上方字段列表中的真实字段名，禁止自造字段
 - 文本字段禁止用is，只能用contains
 - 枚举只匹配选项列表中完整存在的词，禁止拆字母（S09中的S不是选项）
+- 如果问题是一个完整项目名称（含连字符、混合中英文数字），只生成一条项目名称contains条件，不要拆成多个字段
 - 只输出JSON数组，不要任何解释
 
 用户问题：${question}
@@ -458,9 +501,6 @@ function parseLastMonth(q) {
 
 /* ================================================================
    校验 children — 过滤掉 LLM 生成的非法条件
-   合法条件必须满足：
-   - 有 field_name(string) + operator(string) + value(array)  → 叶子条件
-   - 有 conjunction(string) + conditions(array)               → 嵌套条件
    ================================================================ */
 
 function validateChildren(children) {
@@ -471,19 +511,17 @@ function validateChildren(children) {
   const textFields = new Set(IDX.text)
 
   const fixLeaf = (ic) => {
-    // 文本字段用了 is → 自动改为 contains
     if (ic.operator === "is" && textFields.has(ic.field_name)) {
       console.warn(`自动修正: ${ic.field_name} is → contains`)
       return { ...ic, operator: "contains" }
     }
-    // 枚举字段的 value 校验：过滤掉不在选项列表中的值
     if (IDX.select.includes(ic.field_name) && Array.isArray(ic.value)) {
       const validOpts = IDX.selectOptions[ic.field_name] || []
       if (validOpts.length > 0) {
         const filteredValues = ic.value.filter(v => validOpts.includes(v))
         if (filteredValues.length === 0) {
           console.warn(`枚举条件值不合法，跳过: ${ic.field_name} = ${JSON.stringify(ic.value)}`)
-          return null  // 标记为需删除
+          return null
         }
         if (filteredValues.length !== ic.value.length) {
           console.warn(`枚举条件部分值不合法，已过滤: ${ic.field_name} ${JSON.stringify(ic.value)} → ${JSON.stringify(filteredValues)}`)
@@ -498,7 +536,6 @@ function validateChildren(children) {
 
   for (const c of children) {
 
-    // 嵌套条件（conjunction + conditions）
     if (c.conjunction && Array.isArray(c.conditions)) {
       const validInner = c.conditions
           .filter(ic =>
@@ -517,7 +554,6 @@ function validateChildren(children) {
       continue
     }
 
-    // 叶子条件（field_name + operator + value）→ 包一层 conjunction:and
     if (
         c.field_name && typeof c.field_name === "string" &&
         c.operator   && typeof c.operator === "string" &&

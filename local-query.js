@@ -23,6 +23,10 @@ const KNOWN_USERS = [
   { name: "黎碧怡",  alias: ["碧怡", "花花"] }
 ]
 
+/* -------- 出品性质等明确的多条件信号词 -------- */
+
+const NATURE_KEYWORDS = ['商配', '自制', '联制', '商单']
+
 /* -------- 主查询入口 -------- */
 
 async function localQuery(appToken, tableId, question) {
@@ -80,13 +84,18 @@ async function localQuery(appToken, tableId, question) {
 /* -------- LLM 解析问题为结构化条件 -------- */
 
 async function parseConditions(question, meta) {
+  const personHints    = resolvePersonHints(question)
+  const dateHints      = resolveDateHints(question)
+  const hasNature      = NATURE_KEYWORDS.some(k => question.includes(k))
+
+  // ★ 纯项目名称搜索模式：无人名、无时间词、无出品性质关键词
+  //   直接用项目名称 contains，不调用 LLM，避免把名称拆成多字段AND导致0结果
+  if (!personHints.length && !dateHints && !hasNature) {
+    console.log('🔍 纯名称搜索模式，跳过LLM')
+    return [{ field: '项目名称', op: 'contains', value: question }]
+  }
+
   const fieldDesc = buildFieldDesc(meta)
-
-  // ① JS侧预解析人名别名，避免LLM把人名误解为栏目/关键词
-  const personHints = resolvePersonHints(question)
-
-  // ② JS侧预解析相对时间，避免LLM算错或忽略
-  const dateHints = resolveDateHints(question)
 
   const personSection = personHints.length
       ? `## 人名预解析（已识别，直接使用，不要自行推断）\n` +
@@ -133,6 +142,8 @@ ${question}
 - 人名/时间已在上方预解析，直接使用预解析结果，不要再自行推断
 - 问题中出现的人名/别名只能映射到人员字段，绝对不能映射到文本/单选等其他字段
 - 如果问题没有明确筛选条件，返回 []
+- 如果问题看起来是一个完整的项目名称（含连字符、混合中英文数字的字符串），
+  只生成一条 contains 条件映射到「项目名称」字段，不要拆成多个字段条件
 
 示例:
 [{"field": "出品性质", "op": "contains", "value": "商配"}, {"field": "执行日期", "op": "dateRange", "start": "2024-01-01", "end": "2024-12-31"}]`
@@ -189,8 +200,6 @@ function resolveDateHints(question) {
     const end = new Date(monday); end.setDate(monday.getDate() + 6)
     return { raw: '本周', start: fmt(monday), end: fmt(end) }
   }
-  // "今天/明天" 只在明确说"今天执行/今天录制/今天上线"等时才加日期条件
-  // 单独出现的"今天"通常是口语，不加日期限制
   if ((question.includes('今天') || question.includes('今日')) &&
       (question.includes('执行') || question.includes('录制') || question.includes('上线') || question.includes('交片'))) {
     const today = fmt(now)
@@ -278,7 +287,6 @@ function matchOne(rec, cond) {
   const val = rec[cond.field]
 
   // 字段不存在：日期/人员条件跳过（该记录无此字段，不强制不匹配）
-  // contains/eq等精确条件才视为不匹配
   if (cond.field && !(cond.field in rec)) {
     if (cond.op === 'dateRange' || cond.op === 'person') return false
     if (cond.op === 'contains') return false
@@ -325,23 +333,18 @@ function matchOne(rec, cond) {
 function fieldContains(val, keyword) {
   if (val === null || val === undefined) return false
 
-  // 字符串
   if (typeof val === 'string') {
     return val.toLowerCase().includes(keyword)
   }
 
-  // 数字
   if (typeof val === 'number') {
     return String(val).includes(keyword)
   }
 
-  // 飞书文本对象 { text: "..." }
   if (typeof val === 'object' && val !== null) {
 
-    // 单选 { text: "商配" }
     if (val.text) return val.text.toLowerCase().includes(keyword)
 
-    // 多选 [{ text: "A" }, { text: "B" }]
     if (Array.isArray(val)) {
       return val.some(item => {
         if (typeof item === 'string') return item.toLowerCase().includes(keyword)
@@ -352,7 +355,6 @@ function fieldContains(val, keyword) {
       })
     }
 
-    // 超链接 { link: "...", text: "..." }
     if (val.link) return val.link.toLowerCase().includes(keyword)
   }
 
@@ -363,7 +365,6 @@ function fieldContains(val, keyword) {
 
 function fieldPersonMatch(val, targetName) {
   if (!val) return false
-
   const names = extractPersonNames(val)
   return names.some(n => n.toLowerCase().includes(targetName.toLowerCase()))
 }
@@ -388,7 +389,7 @@ function resolvePersonName(input) {
       return u.name
     }
   }
-  return input  // 原样返回
+  return input
 }
 
 /* -------- 解析本地日期字符串为时间戳（避免UTC偏差） -------- */
@@ -404,10 +405,8 @@ function parseLocalDate(dateStr, endOfDay) {
 function extractTimestamp(val) {
   if (!val) return null
 
-  // 飞书日期字段直接是毫秒时间戳数字
   if (typeof val === 'number') return val
 
-  // 某些情况可能是字符串时间戳
   if (typeof val === 'string') {
     const n = Number(val)
     if (!isNaN(n)) return n
