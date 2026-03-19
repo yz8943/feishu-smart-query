@@ -247,16 +247,13 @@ function resolveDateHints(question) {
 
 function buildFieldDesc(meta) {
   if (!meta?.fields) return '（无字段信息）'
-
-  return meta.fields.map(f => {
-    let line = `- ${f.name}（${f.typeLabel}）`
-    if (f.options?.length) {
-      line += `，选项: [${f.options.join(', ')}]`
-    } else if (f.sampleValues?.length) {
-      line += `，示例值: [${f.sampleValues.slice(0, 10).join(', ')}]`
-    }
-    return line
-  }).join('\n')
+  return meta.fields
+      .filter(f => [3, 4, 5, 11].includes(f.type)) // 只传单选/多选/日期/人员
+      .map(f => {
+        let line = `- ${f.name}（${f.typeLabel}）`
+        if (f.options?.length) line += `，选项: [${f.options.join(', ')}]`
+        return line
+      }).join('\n')
 }
 
 /* -------- 本地记录过滤 -------- */
